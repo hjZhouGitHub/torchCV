@@ -34,16 +34,7 @@ train = dict(
     eval_period=5000,
     # output log to console every `log_period` number of iterations.
     log_period=20,
-    # logging training info to Wandb
-    # note that you should add wandb writer in `train_net.py``
-    wandb=dict(
-        enabled=False,
-        params=dict(
-            dir="./wandb_output",
-            project="detrex",
-            name="detrex_experiment",
-        )
-    ),
+    
     # model ema
     model_ema=dict(
         enabled=False,

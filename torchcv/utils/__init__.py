@@ -5,6 +5,7 @@ from .allreduce_norm import *
 from .checkpoint import load_ckpt, save_checkpoint
 from .dist import *
 from .ema import *
+from .env import *
 from .logger import WandbLogger, setup_logger
 from .meter import *
 from .metrics import *

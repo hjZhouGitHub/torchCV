@@ -4,30 +4,35 @@
 
 import torch.nn as nn
 
-from .yolo_head import YOLOXHead
-from .yolo_pafpn import YOLOPAFPN
+from .yolo_head import YOLOv5Head
+from .yolo_pafpn import YOLOv5PAFPN
+from .darknet import YOLOv5CSPDarknet
 
 
-class YOLOX(nn.Module):
+class YOLOv5(nn.Module):
     """
     YOLOX model module. The module list is defined by create_yolov3_modules function.
     The network returns loss values from three YOLO layers during training
     and detection results during test.
     """
 
-    def __init__(self, backbone=None, head=None):
+    def __init__(self, backbone=None, neck=None, head=None):
         super().__init__()
         if backbone is None:
-            backbone = YOLOPAFPN()
+            backbone = YOLOv5CSPDarknet()
+        if neck is None:
+            neck = YOLOv5PAFPN()
         if head is None:
-            head = YOLOXHead(80)
+            head = YOLOv5Head(80)
 
         self.backbone = backbone
+        self.neck = neck
         self.head = head
 
     def forward(self, x, targets=None):
         # fpn output content features of [dark3, dark4, dark5]
-        fpn_outs = self.backbone(x)
+        features = self.backbone(x)
+        fpn_outs = self.neck(features)
 
         if self.training:
             assert targets is not None

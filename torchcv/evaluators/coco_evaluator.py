@@ -20,14 +20,13 @@ import torch
 from torchcv.utils import (
     gather,
     is_main_process,
-    postprocess,
     synchronize,
     time_synchronized,
     xyxy2xywh
 )
 
 
-def per_class_AR_table(coco_eval, class_names=COCO_CLASSES, headers=["class", "AR"], colums=6):
+def per_class_AR_table(coco_eval, class_names=[], headers=["class", "AR"], colums=6):
     per_class_AR = {}
     recalls = coco_eval.eval["recall"]
     # dimension of recalls: [TxKxAxM]
@@ -50,7 +49,7 @@ def per_class_AR_table(coco_eval, class_names=COCO_CLASSES, headers=["class", "A
     return table
 
 
-def per_class_AP_table(coco_eval, class_names=COCO_CLASSES, headers=["class", "AP"], colums=6):
+def per_class_AP_table(coco_eval, class_names=[], headers=["class", "AP"], colums=6):
     per_class_AP = {}
     precisions = coco_eval.eval["precision"]
     # dimension of precisions: [TxRxKxAxM]
@@ -83,7 +82,6 @@ class COCOEvaluator:
 
     def __init__(
         self,
-        dataloader,
         img_size: int,
         confthre: float,
         nmsthre: float,
@@ -103,7 +101,6 @@ class COCOEvaluator:
             per_class_AP: Show per class AP during evalution or not. Default to True.
             per_class_AR: Show per class AR during evalution or not. Default to True.
         """
-        self.dataloader = dataloader
         self.img_size = img_size
         self.confthre = confthre
         self.nmsthre = nmsthre
@@ -113,8 +110,12 @@ class COCOEvaluator:
         self.per_class_AR = per_class_AR
 
     def evaluate(
-        self, model, distributed=False, half=False, trt_file=None,
-        decoder=None, test_size=None, return_outputs=False
+        self, 
+        model, 
+        dataloader, 
+        distributed=False,
+        half=True,
+        return_outputs=False
     ):
         """
         COCO average precision (AP) Evaluation. Iterate inference on the test dataset
@@ -135,57 +136,41 @@ class COCOEvaluator:
         model = model.eval()
         if half:
             model = model.half()
-        ids = []
         data_list = []
         output_data = defaultdict()
         progress_bar = tqdm if is_main_process() else iter
 
         inference_time = 0
         nms_time = 0
-        n_samples = max(len(self.dataloader) - 1, 1)
+        n_samples = max(len(dataloader) - 1, 1)
 
-        if trt_file is not None:
-            from torch2trt import TRTModule
-
-            model_trt = TRTModule()
-            model_trt.load_state_dict(torch.load(trt_file))
-
-            x = torch.ones(1, 3, test_size[0], test_size[1]).cuda()
-            model(x)
-            model = model_trt
-
-        for cur_iter, (imgs, _, info_imgs, ids) in enumerate(
-            progress_bar(self.dataloader)
+        for cur_iter, batch in enumerate(
+            progress_bar(dataloader)
         ):
             with torch.no_grad():
-                imgs = imgs.type(tensor_type)
+                imgs = batch["img"].type(tensor_type)
 
                 # skip the last iters since batchsize might be not enough for batch inference
                 is_time_record = cur_iter < len(self.dataloader) - 1
                 if is_time_record:
-                    start = time.time()
+                    start = time.perf_counter()
 
                 outputs = model(imgs)
-                if decoder is not None:
-                    outputs = decoder(outputs, dtype=outputs.type())
 
                 if is_time_record:
                     infer_end = time_synchronized()
                     inference_time += infer_end - start
-
-                outputs = postprocess(
-                    outputs, self.num_classes, self.confthre, self.nmsthre
-                )
+                
                 if is_time_record:
                     nms_end = time_synchronized()
                     nms_time += nms_end - infer_end
 
             data_list_elem, image_wise_data = self.convert_to_coco_format(
-                outputs, info_imgs, ids, return_outputs=True)
+                outputs, batch, return_outputs=True)
             data_list.extend(data_list_elem)
             output_data.update(image_wise_data)
 
-        statistics = torch.cuda.FloatTensor([inference_time, nms_time, n_samples])
+        statistics = torch.cuda.FloatTensor([inference_time, n_samples])
         if distributed:
             # different process/device might have different speed,
             # to make sure the process will not be stucked, sync func is used here.
@@ -260,22 +245,9 @@ class COCOEvaluator:
         annType = ["segm", "bbox", "keypoints"]
 
         inference_time = statistics[0].item()
-        nms_time = statistics[1].item()
-        n_samples = statistics[2].item()
-
-        a_infer_time = 1000 * inference_time / (n_samples * self.dataloader.batch_size)
-        a_nms_time = 1000 * nms_time / (n_samples * self.dataloader.batch_size)
-
-        time_info = ", ".join(
-            [
-                "Average {} time: {:.2f} ms".format(k, v)
-                for k, v in zip(
-                    ["forward", "NMS", "inference"],
-                    [a_infer_time, a_nms_time, (a_infer_time + a_nms_time)],
-                )
-            ]
-        )
-
+        n_samples = statistics[1].item()
+        a_infer_time = 1000 * inference_time / (n_samples * self.batch_size)
+        time_info = f"Averageinference time: {a_infer_time:.2f} ms."
         info = time_info + "\n"
 
         # Evaluate the Dt (detection) json comparing with the ground truth
