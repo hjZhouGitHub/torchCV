@@ -1,219 +1,26 @@
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
-# Copyright (c) Megvii Inc. All rights reserved.
 
 import torch
 import torch.nn as nn
 from typing import List, Union
 from torch.nn.modules.batchnorm import _BatchNorm
 
-from .darknet import CSPDarknet
-from .misc import make_divisible, make_round
-from .network_blocks import BaseConv, CSPLayer, DWConv
+from ..utils import make_divisible, make_round
+from ..layers import (Conv, C2f, C2, )
 
-
-#!/usr/bin/env python
-# -*- encoding: utf-8 -*-
-# Copyright (c) Megvii Inc. All rights reserved.
-
-import torch
-import torch.nn as nn
-
-from .darknet import Darknet
-from .network_blocks import BaseConv
-
-
-class YOLOFPN(nn.Module):
-    """
-    YOLOFPN module. Darknet 53 is the default backbone of this model.
-    """
-
-    def __init__(
-        self,
-        depth=53,
-        in_features=["dark3", "dark4", "dark5"],
-    ):
-        super().__init__()
-
-        self.backbone = Darknet(depth)
-        self.in_features = in_features
-
-        # out 1
-        self.out1_cbl = self._make_cbl(512, 256, 1)
-        self.out1 = self._make_embedding([256, 512], 512 + 256)
-
-        # out 2
-        self.out2_cbl = self._make_cbl(256, 128, 1)
-        self.out2 = self._make_embedding([128, 256], 256 + 128)
-
-        # upsample
-        self.upsample = nn.Upsample(scale_factor=2, mode="nearest")
-
-    def _make_cbl(self, _in, _out, ks):
-        return BaseConv(_in, _out, ks, stride=1, act="lrelu")
-
-    def _make_embedding(self, filters_list, in_filters):
-        m = nn.Sequential(
-            *[
-                self._make_cbl(in_filters, filters_list[0], 1),
-                self._make_cbl(filters_list[0], filters_list[1], 3),
-                self._make_cbl(filters_list[1], filters_list[0], 1),
-                self._make_cbl(filters_list[0], filters_list[1], 3),
-                self._make_cbl(filters_list[1], filters_list[0], 1),
-            ]
-        )
-        return m
-
-    def load_pretrained_model(self, filename="./weights/darknet53.mix.pth"):
-        with open(filename, "rb") as f:
-            state_dict = torch.load(f, map_location="cpu")
-        print("loading pretrained weights...")
-        self.backbone.load_state_dict(state_dict)
-
-    def forward(self, inputs):
-        """
-        Args:
-            inputs (Tensor): input image.
-
-        Returns:
-            Tuple[Tensor]: FPN output features..
-        """
-        #  backbone
-        out_features = self.backbone(inputs)
-        x2, x1, x0 = [out_features[f] for f in self.in_features]
-
-        #  yolo branch 1
-        x1_in = self.out1_cbl(x0)
-        x1_in = self.upsample(x1_in)
-        x1_in = torch.cat([x1_in, x1], 1)
-        out_dark4 = self.out1(x1_in)
-
-        #  yolo branch 2
-        x2_in = self.out2_cbl(out_dark4)
-        x2_in = self.upsample(x2_in)
-        x2_in = torch.cat([x2_in, x2], 1)
-        out_dark3 = self.out2(x2_in)
-
-        outputs = (out_dark3, out_dark4, x0)
-        return outputs
-
-class YOLOPAFPN(nn.Module):
-    """
-    YOLOv3 model. Darknet 53 is the default backbone of this model.
-    """
-
-    def __init__(
-        self,
-        depth=1.0,
-        width=1.0,
-        in_features=("dark3", "dark4", "dark5"),
-        in_channels=[256, 512, 1024],
-        depthwise=False,
-        act="silu",
-    ):
-        super().__init__()
-        self.backbone = CSPDarknet(depth, width, depthwise=depthwise, act=act)
-        self.in_features = in_features
-        self.in_channels = in_channels
-        Conv = DWConv if depthwise else BaseConv
-
-        self.upsample = nn.Upsample(scale_factor=2, mode="nearest")
-        self.lateral_conv0 = BaseConv(
-            int(in_channels[2] * width), int(in_channels[1] * width), 1, 1, act=act
-        )
-        self.C3_p4 = CSPLayer(
-            int(2 * in_channels[1] * width),
-            int(in_channels[1] * width),
-            round(3 * depth),
-            False,
-            depthwise=depthwise,
-            act=act,
-        )  # cat
-
-        self.reduce_conv1 = BaseConv(
-            int(in_channels[1] * width), int(in_channels[0] * width), 1, 1, act=act
-        )
-        self.C3_p3 = CSPLayer(
-            int(2 * in_channels[0] * width),
-            int(in_channels[0] * width),
-            round(3 * depth),
-            False,
-            depthwise=depthwise,
-            act=act,
-        )
-
-        # bottom-up conv
-        self.bu_conv2 = Conv(
-            int(in_channels[0] * width), int(in_channels[0] * width), 3, 2, act=act
-        )
-        self.C3_n3 = CSPLayer(
-            int(2 * in_channels[0] * width),
-            int(in_channels[1] * width),
-            round(3 * depth),
-            False,
-            depthwise=depthwise,
-            act=act,
-        )
-
-        # bottom-up conv
-        self.bu_conv1 = Conv(
-            int(in_channels[1] * width), int(in_channels[1] * width), 3, 2, act=act
-        )
-        self.C3_n4 = CSPLayer(
-            int(2 * in_channels[1] * width),
-            int(in_channels[2] * width),
-            round(3 * depth),
-            False,
-            depthwise=depthwise,
-            act=act,
-        )
-
-    def forward(self, input):
-        """
-        Args:
-            inputs: input images.
-
-        Returns:
-            Tuple[Tensor]: FPN feature.
-        """
-
-        #  backbone
-        out_features = self.backbone(input)
-        features = [out_features[f] for f in self.in_features]
-        [x2, x1, x0] = features
-
-        fpn_out0 = self.lateral_conv0(x0)  # 1024->512/32
-        f_out0 = self.upsample(fpn_out0)  # 512/16
-        f_out0 = torch.cat([f_out0, x1], 1)  # 512->1024/16
-        f_out0 = self.C3_p4(f_out0)  # 1024->512/16
-
-        fpn_out1 = self.reduce_conv1(f_out0)  # 512->256/16
-        f_out1 = self.upsample(fpn_out1)  # 256/8
-        f_out1 = torch.cat([f_out1, x2], 1)  # 256->512/8
-        pan_out2 = self.C3_p3(f_out1)  # 512->256/8
-
-        p_out1 = self.bu_conv2(pan_out2)  # 256->256/16
-        p_out1 = torch.cat([p_out1, fpn_out1], 1)  # 256->512/16
-        pan_out1 = self.C3_n3(p_out1)  # 512->512/16
-
-        p_out0 = self.bu_conv1(pan_out1)  # 512->512/32
-        p_out0 = torch.cat([p_out0, fpn_out0], 1)  # 512->1024/32
-        pan_out0 = self.C3_n4(p_out0)  # 1024->1024/32
-
-        outputs = (pan_out2, pan_out1, pan_out0)
-        return outputs
-
-
-class YOLOv5PAFPN(nn.Module):
+class YOLOv8PAFPN(nn.Module):
     
     def __init__(self, 
                  in_channels: List[int],
                  out_channels: Union[int, List[int]],
+                 arch: str = 'P5',
                  deepen_factor: float = 1.0,
                  widen_factor: float = 1.0,
-                 num_csp_blocks: int = 1,
-                 freeze_all: bool = False,
-                 act: str ="silu",
+                 num_csp_blocks: int = 3,
+                 freeze: bool = False,
+                 act: str ="SiLU",
+                 norm: str = "BN",
                  ):
         super().__init__()
         self.in_channels = in_channels
@@ -221,8 +28,11 @@ class YOLOv5PAFPN(nn.Module):
         self.deepen_factor = deepen_factor
         self.widen_factor = widen_factor
         self.num_csp_blocks = num_csp_blocks
-        self.freeze_all = freeze_all
+        self.freeze_all = freeze
         self.act = act
+        self.norm = norm
+
+        self.CSPLayer = C2 if arch == 'P6' else C2f
         
         self.reduce_layers = nn.ModuleList()
         for idx in range(len(in_channels)):
@@ -245,6 +55,9 @@ class YOLOv5PAFPN(nn.Module):
         self.out_layers = nn.ModuleList()
         for idx in range(len(in_channels)):
             self.out_layers.append(self.build_out_layer(idx))
+
+        if freeze > 0:
+            self._freeze_all()
         
     def build_reduce_layer(self, idx: int) -> nn.Module:
         """build reduce layer.
@@ -255,15 +68,7 @@ class YOLOv5PAFPN(nn.Module):
         Returns:
             nn.Module: The reduce layer.
         """
-        if idx == len(self.in_channels) - 1:
-            layer = BaseConv(
-                make_divisible(self.in_channels[idx], self.widen_factor),
-                make_divisible(self.in_channels[idx - 1], self.widen_factor),
-                1,
-                act=self.act)
-        else:
-            layer = nn.Identity()
-
+        layer = nn.Identity()
         return layer
     
     def build_upsample_layer(self, *args, **kwargs) -> nn.Module:
@@ -279,33 +84,14 @@ class YOLOv5PAFPN(nn.Module):
         Returns:
             nn.Module: The top down layer.
         """
-
-        if idx == 1:
-            return CSPLayer(
-                make_divisible(self.in_channels[idx - 1] * 2,
-                               self.widen_factor),
-                make_divisible(self.in_channels[idx - 1], self.widen_factor),
-                n=make_round(self.num_csp_blocks, self.deepen_factor),
-                shortcut=False,
-                act=self.act)
-        else:
-            return nn.Sequential(
-                CSPLayer(
-                    make_divisible(self.in_channels[idx - 1] * 2,
-                                   self.widen_factor),
-                    make_divisible(self.in_channels[idx - 1],
-                                   self.widen_factor),
-                    n=make_round(self.num_csp_blocks,
-                                          self.deepen_factor),
-                    shortcut=False,
-                    act=self.act),
-                BaseConv(
-                    make_divisible(self.in_channels[idx - 1],
-                                   self.widen_factor),
-                    make_divisible(self.in_channels[idx - 2],
-                                   self.widen_factor),
-                    ksize=1,
-                    act=self.act))
+        return self.CSPLayer(
+            make_divisible(self.in_channels[idx - 1] * 2,
+                            self.widen_factor),
+            make_divisible(self.in_channels[idx - 1], self.widen_factor),
+            n=make_round(self.num_csp_blocks, self.deepen_factor),
+            shortcut=False,
+            act=self.act,
+            norm=self.norm)
 
     def build_downsample_layer(self, idx: int) -> nn.Module:
         """build downsample layer.
@@ -316,12 +102,13 @@ class YOLOv5PAFPN(nn.Module):
         Returns:
             nn.Module: The downsample layer.
         """
-        return BaseConv(
+        return Conv(
             make_divisible(self.in_channels[idx], self.widen_factor),
             make_divisible(self.in_channels[idx], self.widen_factor),
-            ksize=3,
-            stride=2,
-            act=self.act)
+            k=3,
+            s=2,
+            act=self.act,
+            norm=self.norm)
 
     def build_bottom_up_layer(self, idx: int) -> nn.Module:
         """build bottom up layer.
@@ -332,12 +119,13 @@ class YOLOv5PAFPN(nn.Module):
         Returns:
             nn.Module: The bottom up layer.
         """
-        return CSPLayer(
+        return self.CSPLayer(
             make_divisible(self.in_channels[idx] * 2, self.widen_factor),
             make_divisible(self.in_channels[idx + 1], self.widen_factor),
             n=make_round(self.num_csp_blocks, self.deepen_factor),
             shortcut=False,
-            act=self.act)
+            act=self.act,
+            norm=self.norm)
 
     def build_out_layer(self, *args, **kwargs) -> nn.Module:
         """build out layer."""

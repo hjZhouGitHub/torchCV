@@ -59,9 +59,9 @@ class YOLOv8CSPDarknet(nn.Module):
     # the final out_channels will be set according to the param.
     ARCH_SETTING = {
         'P5': [[64, 128, 3, True, False], [128, 256, 6, True, False],
-               [256, 512, 9, True, False], [512, 1024, 3, True, True]],
+               [256, 512, 6, True, False], [512, 1024, 3, True, True]],
         'P6': [[64, 128, 3, True, False], [128, 256, 6, True, False],
-               [256, 512, 9, True, False], [512, 768, 3, True, False],
+               [256, 512, 6, True, False], [512, 768, 3, True, False],
                [768, 1024, 3, True, True]]
     }
 
@@ -71,8 +71,8 @@ class YOLOv8CSPDarknet(nn.Module):
                  widen_factor: float = 1.0,
                  input_channels: int = 3,
                  out_indices: Tuple[int] = (2, 3, 4),
-                 frozen_stages: int = -1,
-                 act: str = "silu",
+                 freeze: int = -1,
+                 act: str = "SiLU",
                  norm: str = "BN",
                  ):
         super().__init__()
@@ -82,14 +82,14 @@ class YOLOv8CSPDarknet(nn.Module):
         assert set(out_indices).issubset(
             i for i in range(len(self.arch_setting) + 1))
 
-        if frozen_stages not in range(-1, len(self.arch_setting) + 1):
+        if freeze not in range(-1, len(self.arch_setting) + 1):
             raise ValueError('"frozen_stages" must be in range(-1, '
                              'len(arch_setting) + 1). But received '
-                             f'{frozen_stages}')
+                             f'{freeze}')
 
         self.input_channels = input_channels
         self.out_indices = out_indices
-        self.frozen_stages = frozen_stages
+        self.freeze_stages = freeze
         self.widen_factor = widen_factor
         self.deepen_factor = deepen_factor
         self.act = act
@@ -99,16 +99,18 @@ class YOLOv8CSPDarknet(nn.Module):
         self.layers = ['stem']
         
         for idx, setting in enumerate(self.arch_setting):
-            stage = []
-            stage += self.build_stage_layer(setting)
+            stage = self.build_stage_layer(setting)
             self.add_module(f'stage{idx + 1}', nn.Sequential(*stage))
             self.layers.append(f'stage{idx + 1}')
+        
+        if freeze > 0:
+            self._freeze_stages()
 
     def _freeze_stages(self):
         """Freeze the parameters of the specified stage so that they are no
         longer updated."""
-        if self.frozen_stages >= 0:
-            for i in range(self.frozen_stages + 1):
+        if self.freeze_stages > 0:
+            for i in range(self.freeze_stages + 1):
                 m = getattr(self, self.layers[i])
                 m.eval()
                 for param in m.parameters():
@@ -121,8 +123,8 @@ class YOLOv8CSPDarknet(nn.Module):
             make_divisible(self.arch_setting[0][0], self.widen_factor),
             k=3,
             s=2,
-            norm=self.norm,
-            act=self.act)
+            act=self.act,
+            norm=self.norm)
 
     def build_stage_layer(self, setting: list) -> list:
         """Build a stage layer.
@@ -142,24 +144,24 @@ class YOLOv8CSPDarknet(nn.Module):
             out_channels,
             k=3,
             s=2,
-            norm=self.norm,
-            act=self.act)
+            act=self.act,
+            norm=self.norm)
         stage.append(conv_layer)
         csp_layer = C2f(
             out_channels,
             out_channels,
             n=num_blocks,
             shortcut=add_identity,
-            norm=self.norm,
-            act=self.act)
+            act=self.act,
+            norm=self.norm)
         stage.append(csp_layer)
         if use_spp:
             spp = SPPF(
                 out_channels,
                 out_channels,
                 k=5,
-                norm=self.norm,
-                act=self.act)
+                act=self.act,
+                norm=self.norm)
             stage.append(spp)
         return stage
 

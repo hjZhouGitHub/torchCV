@@ -185,16 +185,16 @@ class C1(nn.Module):
 class C2(nn.Module):
     """CSP Bottleneck with 2 convolutions."""
 
-    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5, act="SiLU", norm="BN"):
         """Initializes the CSP Bottleneck with 2 convolutions module with arguments ch_in, ch_out, number, shortcut,
         groups, expansion.
         """
         super().__init__()
         self.c = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
-        self.cv2 = Conv(2 * self.c, c2, 1)  # optional act=FReLU(c2)
+        self.cv1 = Conv(c1, 2 * self.c, 1, 1, act=act, norm=norm)
+        self.cv2 = Conv(2 * self.c, c2, 1, act=act, norm=norm)  # optional act=FReLU(c2)
         # self.attention = ChannelAttention(2 * self.c)  # or SpatialAttention()
-        self.m = nn.Sequential(*(Bottleneck(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0) for _ in range(n)))
+        self.m = nn.Sequential(*(Bottleneck(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0, act=act, norm=norm) for _ in range(n)))
 
     def forward(self, x):
         """Forward pass through the CSP bottleneck with 2 convolutions."""
